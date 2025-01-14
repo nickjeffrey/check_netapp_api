@@ -15,7 +15,7 @@ Create a username/password on the NetApp ONTAP storage system with API privilege
 You will need a section in the services.cfg file on the nagios server that looks similar to the following.
 ```
     define service{
-       #syntax is check_netapp_health!SNMP_community_name
+       #syntax is check_netapp_health!username!password
        use                             generic-service
        host_name                       netappfiler01
        service_description             Netapp health check

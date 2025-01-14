@@ -1,0 +1,913 @@
+#!/usr/bin/perl -w
+
+# OUTSTANDING TASKS
+# -----------------
+# Add a subroutine to validate credentials.  If bad credentials are used, curl will receive a message similar to:
+# {"error":{"code":"6691623", "message":"User is not authorized."}}
+
+
+
+# CHANGE LOG
+# ----------
+#  2024-12-16	njeffrey	Script created
+#  2025-11-13	njeffrey	Add error check to confirm --user=XXX --password=YYY parameters were provided
+#  2025-11-13	njeffrey	Add get_system_health subroutine
+
+
+
+# nagios check for used space on NetApp ONTAP storage
+#
+
+
+# CONFIGURATION
+# -------------
+# Create a username/password on the NetApp ONTAP storage system with API privileges
+# <add details here>
+
+# You will need a section in the services.cfg file on the nagios server that looks similar to the following.
+#    # Define service to peform SNMP queries against remote AIX machine to confirm AIX SNMP daemons are running
+#    # Pass the SNMP community string as the only parameter
+#    define service {
+#       use                             generic-service
+#       hostgroup_name                  all_netapp
+#       service_description             NetApp space
+#       check_command                   check_netapp_api!api_username!api_password
+#       }
+#
+#
+#
+# You will also need a command definition similar to the following in the commands.cfg file:
+#    # check_netapp_api command definition
+#    define command{
+#       command_name    check_netapp_api
+#       command_line    $USER1$/check_netapp_api -H $HOSTADDRESS$ --user $ARG1$ --password $ARG2$
+#       }
+#
+#
+
+
+# TROUBLESHOOTING
+# ---------------
+#
+
+use strict;							#enforce good coding practices
+use Getopt::Long;                      		 		#allow --long-switches to be used as parameters
+use Time::Local;						#perform date/time calculations   yum install perl-Time-Local
+
+
+# Declare variables
+my ($curl,$jq, $cmd,$key,%system,%node,%aggr,%volume);
+my ($sec, $min, $hour, $mday, $mon, $year);
+my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
+my ($epoch_seconds_timestamp,$epoch_seconds_now);
+my ($output_filename,$output_file_age,$output_message,$common_output_data,$perf_data,$verbose);
+my ($opt_H,$opt_u,$opt_p,$opt_h,$opt_v,$opt_w,$opt_c);
+my ($bytes_warn,$bytes_crit);
+my ($user,$password,$host);
+my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
+$verbose    = "no";						#yes|no flag to increase verbosity for debugging
+$CHECK_NAME = "NetApp";
+$curl       = "/usr/bin/curl";         #location of binary
+$jq         = "/usr/bin/jq";         #location of binary
+#
+# Nagios return codes
+#
+$OK=		0;
+$WARN=		1;
+$CRITICAL=	2;
+$UNKNOWN=	3;
+
+
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   #
+   print "Running get_options subroutine \n" if ($verbose eq "yes");
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "H=s" => \$opt_H, "host=s"     => \$opt_H,
+      "u=s" => \$opt_u, "user=s"     => \$opt_u,
+      "p=s" => \$opt_p, "password=s" => \$opt_p,
+      "h"   => \$opt_h, "help"       => \$opt_h,
+      "v"   => \$opt_v, "verbose"    => \$opt_v,
+      "w=i" => \$opt_w, "warn=i"     => \$opt_w,  "warning=i"  => \$opt_w,
+      "c=i" => \$opt_c, "crit=i"     => \$opt_c,  "critical=i" => \$opt_c,
+   );
+   #
+   # If the user supplied the -h or --help switch, give them some help.
+   #
+   if( defined( $opt_h ) ) {
+      print "Use this syntax \n";
+      print "   $0 \n";
+      print "   $0 --host     HostNameOfNetApp  \n";
+      print "   $0 --user     SomeAPIuser  \n";
+      print "   $0 --password SomeAPIpassword  \n";
+      print "   $0 --verbose     (increase output for debugging \n";
+      print "   $0 --warn=#      (# of bytes to warn      \n";
+      print "   $0 --crit=#      (# of bytes to critical  \n";
+      print "   $0 --help        (this help  \n";
+      exit $CRITICAL;				#exit script
+   }
+   #
+   # If the user supplied the --verbose switch, increase output verbosity
+   #
+   if( defined( $opt_v ) ) {
+      $verbose = "yes";
+   } else {
+      $verbose = "no";
+   }
+   #
+   # If the user provided -w or --warn or --warning parameter, use that value as the number of days to warn on
+   #
+   if( defined( $opt_w ) ) {
+      $bytes_warn = $opt_w;
+      print "   setting warning threshold to $bytes_warn days \n" if ($verbose eq "yes");
+   }
+   #
+   # If the user provided -c or --crit or --critical parameter, use that value as the number of days to warn on
+   #
+   if( defined( $opt_c ) ) {
+      $bytes_crit = $opt_c;
+      print "   setting critical threshold to $bytes_crit days \n" if ($verbose eq "yes");
+   }
+   #
+   # If the user provided -H or --host parameter, use that value as the hostname of the remote device to query
+   #
+   if( defined( $opt_H ) ) {
+      $host = $opt_H;
+      print "   setting remote host to $host \n" if ($verbose eq "yes");
+   }
+   #
+   # If the user provided -u or --user parameter, use that value as the username on the remote device
+   #
+   if( defined( $opt_u ) ) {
+      $user = $opt_u;
+      print "   setting remote user to $user \n" if ($verbose eq "yes");
+   } else {
+      print "ERROR: please provide --user=XXXX parameter, or use --help  \n";
+      exit $UNKNOWN;
+   }
+   #
+   # If the user provided -p or --password parameter, use that value as the password on the remote device
+   #
+   if( defined( $opt_p ) ) {
+      $password = $opt_p;
+      print "   setting remote password to $password \n" if ($verbose eq "yes");
+   } else {
+      print "ERROR: please provide --password=XXXX parameter, or use --help  \n";
+      exit $UNKNOWN;
+   }
+}						                       #end of subroutine
+
+
+
+
+
+sub sanity_checks {
+   #
+   print "Running sanity_checks subroutine \n" if ($verbose eq "yes");
+   #
+   # confirm /usr/bin/curl file exists 
+   if ( ! -e $curl ) {
+      print "ERROR: Cannot find $curl \n";
+      exit $CRITICAL;
+   }
+   #
+   # confirm /usr/bin/jq file exists 
+   if ( ! -e $jq ) {
+      print "ERROR: Cannot find $jq \n";
+      exit $CRITICAL;
+   }
+}									#end of subroutine
+
+
+
+
+
+
+
+
+sub check_for_output_file {
+   #
+   # a cron job may have already created the output file that we need
+   #
+   print "running check_for_output_file subroutine \n" if ($verbose eq "yes");
+   #
+   $output_filename = "/tmp/nagios.check_netapp_api.tmp";
+   #
+   #
+   if ( -e "$output_filename" )  {             				#see if a cron job has already provided the info we need
+      ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($output_filename); #get last modification time in seconds since the epoch
+      $output_file_age = time - $mtime;                                 #figure out how many seconds old the file is
+      print "   output file $output_filename is $output_file_age seconds old \n" if ($verbose eq "yes");
+      #
+      # Delete the output file if it is more than 1440 seconds (4 hours) old.
+      # This section only runs when executed from the root crontab, because 
+      # write permissions to the output file are required.
+      #
+      if ( (-w $output_filename) && ($output_file_age >= 1440) ) {     	#see if the file is writable and more than 1440 seconds (4 hours) old
+         print "   deleting old copy of $output_filename \n" if ($verbose eq "yes");
+         unlink "$output_filename";                                  	#delete the file, which causes the rest of the script to run
+      }
+      #
+      # This section runs if the temporary file is too old, 
+      # which usually means the root crontab is not running this script.
+      #
+      if ( (-e "$output_filename") && ($output_file_age >= 86400) ) {   #raise an alert if the file is more than 86400 seconds (24 hours) old
+         print "$CHECK_NAME WARN - temporary file $output_filename not being automatically created via cron.  Please investigate. \n";
+         exit $WARN;                                                    #exit script
+      }									#end of if block
+   }                                                                    #end of if block
+   #
+   # This section runs when the temporary file exists and is not too old.
+   # The expectation is that this section is run by the low-privilege nagios user.
+   #
+   if ( -e "$output_filename" ) {   		            		#see if a cron job has already provided the info we need
+      open (OUT,"$output_filename") or die "Cannot open $output_filename for reading $! \n";
+      while (<OUT>) {                                                   #read a line from the text file
+         $output_message = $_  if ( $_ =~ /[a-zA-Z]/);                  #get the content of the output file into a variable
+         print "   output message is $output_message \n" if ($verbose eq "yes");
+      }                                                                 #end of while loop
+      close OUT;                                                        #close filehandle
+      print $output_message;                                            #print the content of the output file
+      exit $CRITICAL if ( $output_message =~ /CRITICAL/ );              #exit script with appropriate return code
+      exit $WARN     if ( $output_message =~ /WARN/ );                  #exit script with appropriate return code
+      exit $UNKNOWN  if ( $output_message =~ /UNKNOWN/ );               #exit script with appropriate return code
+      exit $OK       if ( $output_message =~ /OK/ );                    #exit script with appropriate return code
+   }                                                                    #end of if block
+}                                                                       #end of subroutine
+
+
+
+
+
+sub print_to_outputfile {
+   #
+   print "running print_to_outputfile \n" if ($verbose eq "yes");
+   #
+   # This subroutine is called whenever an output message is printed, to confirm that the $output_file exists
+   #
+   # confirm the output message exists
+   $output_message = "$CHECK_NAME UNKNOWN - could not parse response from remote host \n" unless ($output_message);
+   #
+   # confirm the $output_filename variable is defined
+   unless ($output_filename) {
+      print "$CHECK_NAME UNKNOWN - the \$output_filename variable is not defined.  This might be a script bug. \n";
+      exit $UNKNOWN;                                                            #only get this far if OK/WARN/CRITICAL/UNKNOWN was not found in the output file
+   }                                                                            #end of unless block
+   #
+   if ( ! -e "$output_filename" ) {                                                     #only run this section if $output_filename does not already exist
+      print "   $output_filename not found - writing output message to $output_filename \n" if ($verbose eq "yes");
+      open (OUT,">$output_filename") or die "Cannot open $output_filename for writing: $! \n";
+      print OUT "$output_message";
+      close OUT;                                                                #close filehandle
+      chmod 0644, "$output_filename";                                           #set the file permission to -rw-r--r-- to ensure nagios user can read file
+   }                                                                            #end of if block
+}                                                                               #end of subroutine
+
+
+
+sub get_system_health {
+   #
+   print "running get_system_health subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine uses the /api/private/cli/ section of the API, which essentially lets you run CLI commands.  Refer to API docs for more details.
+   #
+   # Output of command will be similar to the following.  
+   # Status will be one of:
+   #      ok        The system is operating normally, and there are no issues detected.
+   #      degraded  One or more components are not functioning optimally. The issue may not immediately affect operations but should be addressed soon.
+   #      critical  One or more components are in a critical state, potentially impacting the system's operations. Immediate attention is required.
+   #
+   #  The following API query is equivalent to the CLI command: system health status show
+   #  curl -s -X GET -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/private/cli/system/health/status'
+   #   {
+   #      "status": "ok"
+   #   }
+   #
+   #
+   $system{health} = "unknown";					#initialize hash element to avoid undef errors
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/private/cli/system/health/status' | $jq '.status' ";  
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");	#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([a-zA-Z0-9\-]+)/ ) {
+         $system{health} = $1;					#assign value to hash
+         print "   found global health status: $system{health} \n" if ($verbose eq "yes");
+      }
+   }								#end of while loop
+   close IN;							#close filehandle
+}               
+
+
+
+
+sub get_node_uuid {
+   #
+   print "running get_node_uuid subroutine \n" if ($verbose eq "yes");
+   #
+   # Output of command will be similar to the following.
+   # The only JSON key:value pair we are interested in at this level is the top-level instance of uuid,
+   # because that will give us a list of all the cluster node names, which we will use later.
+   #
+   #  curl -s -X GET -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/cluster/nodes'
+   #   {
+   #   {
+   #     "records": [
+   #       {
+   #         "uuid": "38ce0f8f-54ec-11ea-bb4a-d039ea17c088",
+   #         "name": "prod01stg01_4",
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/cluster/nodes/38ce0f8f-54ec-11ea-bb4a-d039ea17c088"
+   #           }
+   #         }
+   #       },
+   #       {
+   #         "uuid": "73ce8df0-31b6-11e8-8828-00a098d393ea",
+   #         "name": "prod01stg01_1",
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/cluster/nodes/73ce8df0-31b6-11e8-8828-00a098d393ea"
+   #           }
+   #         }
+   #       },
+   #       {
+   #         "uuid": "74da60a4-31b6-11e8-83ec-00a098d57622",
+   #         "name": "prod01stg01_2",
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/cluster/nodes/74da60a4-31b6-11e8-83ec-00a098d57622"
+   #           }
+   #         }
+   #       },
+   #       {
+   #         "uuid": "ee6204ff-54eb-11ea-8d2e-d039ea175264",
+   #         "name": "prod01stg01_3",
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/cluster/nodes/ee6204ff-54eb-11ea-8d2e-d039ea175264"
+   #           }
+   #         }
+   #       }
+   #     ],
+   #     "num_records": 4,
+   #     "_links": {
+   #       "self": {
+   #         "href": "/api/cluster/nodes"
+   #       }
+   #     }
+   #   }
+   #
+   #
+   #
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/cluster/nodes\' | $jq '.records[].uuid' ";  
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");	#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([a-zA-Z0-9\-]+)/ ) {
+         $node{$1}{uuid} = $1;					#assign value to hash
+         print "   found node with uuid $1 \n" if ($verbose eq "yes");
+      }
+   }								#end of while loop
+   close IN;							#close filehandle
+}                                               		#end of subroutine
+
+
+
+
+sub get_node_details {
+   #
+   print "running get_node_details subroutine \n" if ($verbose eq "yes");
+   #
+   # In a previous subroutine, we got all the node UUID values, which will we now use
+   # to query each node individually to extract details such as battery status, fan status, power supply status, etc.
+   #
+   # Sample output for each node:
+   #     /usr/bin/curl -k -s -X GET -u 'MyUserName:MyPassword' 'https://MyNetApp/api/cluster/nodes/ee6204ff-54eb-11ea-8d2e-d039ea175264'
+   #   {
+   #     "uuid": "ee6204ff-54eb-11ea-8d2e-d039ea175264",
+   #     "name": "prod01stg01_3",
+   #     "serial_number": "622008000105",
+   #     "location": "BigCorp Data Center, 123 Fake Street, Anytown",
+   #     "owner": "",
+   #     "model": "AFF-A220",
+   #     "system_id": "0538143748",
+   #     "version": {
+   #       "full": "NetApp Release 9.9.1P16: Thu May 25 01:06:07 UTC 2023",
+   #       "generation": 9,
+   #       "major": 9,
+   #       "minor": 1
+   #     },
+   #     "date": "2024-12-16T14:16:24-07:00",
+   #     "uptime": 44477625,
+   #     "state": "up",
+   #     "membership": "member",
+   #     "management_interfaces": [
+   #       {
+   #         "uuid": "7fe2bbaf-8f3a-11ea-9992-d039ea175264",
+   #         "name": "calstg02-01_mgmt1",
+   #         "ip": {
+   #           "address": "172.19.0.209"
+   #         },
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/network/ip/interfaces/7fe2bbaf-8f3a-11ea-9992-d039ea175264"
+   #           }
+   #         }
+   #       }
+   #     ],
+   #     "cluster_interfaces": [
+   #       {
+   #         "uuid": "7fe299b7-8f3a-11ea-9992-d039ea175264",
+   #         "name": "prod02stg01_01_clus1",
+   #         "ip": {
+   #           "address": "169.254.180.30"
+   #         },
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/network/ip/interfaces/7fe299b7-8f3a-11ea-9992-d039ea175264"
+   #           }
+   #         }
+   #       },
+   #       {
+   #         "uuid": "7fe28c21-8f3a-11ea-9992-d039ea175264",
+   #         "name": "prod02stg01_02_clus2",
+   #         "ip": {
+   #           "address": "169.254.62.177"
+   #         },
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/network/ip/interfaces/7fe28c21-8f3a-11ea-9992-d039ea175264"
+   #           }
+   #         }
+   #       }
+   #     ],
+   #     "storage_configuration": "multi_path_ha",
+   #     "controller": {
+   #       "board": "System Board XXII",
+   #       "memory_size": 32768000000,
+   #       "over_temperature": "normal",
+   #       "failed_fan": {
+   #         "count": 0,
+   #         "message": {
+   #           "message": "There are no failed fans.",
+   #           "code": "5505031"
+   #        }
+   #       },
+   #       "failed_power_supply": {
+   #         "count": 0,
+   #         "message": {
+   #           "message": "There are no failed power supplies.",
+   #           "code": "5505032"
+   #         }
+   #       },
+   #       "cpu": {
+   #         "firmware_release": "11.20",
+   #         "processor": "Intel(R) Xeon(R) CPU D-1557 @ 1.50GHz",
+   #         "count": 12
+   #       }
+   #     },
+   #     "ha": {
+   #       "enabled": true,
+   #       "auto_giveback": true,
+   #       "partners": [
+   #         {
+   #           "uuid": "38ce0f8f-54ec-11ea-bb4a-d039ea17c088",
+   #           "name": "prod01stg01_4"
+   #         }
+   #       ],
+   #       "giveback": {
+   #         "state": "nothing_to_giveback"
+   #       },
+   #       "takeover": {
+   #         "state": "not_attempted"
+   #       },
+   #       "ports": [
+   #         {
+   #           "number": 0,
+   #           "state": "active"
+   #         }
+   #       ]
+   #     },
+   #     "service_processor": {
+   #       "dhcp_enabled": false,
+   #       "state": "online",
+   #       "mac_address": "d0:39:ea:17:52:66",
+   #       "firmware_version": "11.9",
+   #       "link_status": "up",
+   #       "ipv4_interface": {
+   #         "address": "172.19.0.213",
+   #         "netmask": "255.255.255.0",
+   #         "gateway": "172.19.0.1"
+   #       }
+   #     },
+   #     "nvram": {
+   #       "id": 538143748,
+   #       "battery_state": "battery_ok"
+   #     },
+   #     "_links": {
+   #       "self": {
+   #         "href": "/api/cluster/nodes/ee6204ff-54eb-11ea-8d2e-d039ea175264"
+   #       }
+   #     }
+   #   }
+   #
+   #
+   #
+   foreach $key (sort keys %node) {                                      #loop through for each key value in hash, which is the uuid of each clust4er node
+      next unless $key;                                                 #skip any blank lines
+      print "\n   found node with uuid $node{$key}{uuid} \n" if ($verbose eq "yes");
+      $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/cluster/nodes/$node{$key}{uuid}\' | $jq '{name, serial_number, model, failed_fan_count: .controller.failed_fan.count, failed_power_supply_count: .controller.failed_power_supply.count, battery_state: .nvram.battery_state}'  ";
+
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open (IN,"$cmd 2>&1|");	#open filehandle
+      while (<IN>) {						#read a line from the filehandle
+         s/\"//g; 							#remove embedded quotation marks
+         if ( /name: ([a-zA-Z0-9_\-]+)/ ) {
+            $node{$key}{name} = $1;					#assign value to hash
+         }
+         if ( /serial_number: ([a-zA-Z0-9]+)/ ) {
+            $node{$key}{serial_number} = $1;					#assign value to hash
+         }
+         if ( /model: ([a-zA-Z0-9]+)/ ) {
+            $node{$key}{model} = $1;					#assign value to hash
+         }
+         if ( /failed_fan_count: ([0-9]+)/ ) {
+            $node{$key}{failed_fan_count} = $1;					#assign value to hash
+         }
+         if ( /battery_statet: ([a-zA-Z0-9_]+)/ ) {
+            $node{$key}{battery_state} = $1;					#assign value to hash
+         }
+         if ( /failed_power_supply_count: ([0-9]+)/ ) {
+            $node{$key}{failed_power_supply_count} = $1;					#assign value to hash
+            print "   found node with uuid:$node{$key}{uuid} name:$node{$key}{name}  serial_number$node{$key}{serial_number} model:$node{$key}{model} failed_fan_count:$node{$key}{failed_fan_count} failed_power_supply_count:$node{$key}{failed_power_supply_count} \n" if ($verbose eq "yes");
+         }
+      }								#end of while loop
+      close IN;							#close filehandle
+   }                                               		#end of foreach loop
+}                                               		#end of subroutine
+
+
+
+
+
+
+
+
+
+
+
+sub get_aggregate_uuid {
+   #
+   print "running get_aggregate_uuid subroutine \n" if ($verbose eq "yes");
+   #
+   # Output of command will be similar to the following.
+   # The only JSON key:value pair we are interested in at this level is the top-level instance of uuid,
+   # because that will give us a list of all the aggregate names, which we will use later.
+   #
+   #  curl -s -X GET -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/storage/aggregates'
+   #   {
+   #     "records": [
+   #       {
+   #         "uuid": "1b1b1bd3-a138-4ebf-86b4-ddcf2e1b7495",
+   #         "name": "aggr10_AFF_SSD",
+   #         "node": {
+   #           "uuid": "ee6204ff-54eb-11ea-8d2e-d039ea175264",
+   #           "name": "prod01stg01_3",
+   #           "_links": {
+   #             "self": {
+   #               "href": "/api/cluster/nodes/ee6204ff-54eb-11ea-8d2e-d039ea175264"
+   #             }
+   #           }
+   #         },
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/storage/aggregates/1b1b1bd3-a138-4ebf-86b4-ddcf2e1b7495"
+   #           }
+   #         }
+   #       },
+   #       {
+   #         "uuid": "31f413ef-23f2-4805-8468-334d89d4b182",
+   #         "name": "aggr99_900GB_SAS",
+   #         "node": {
+   #           "uuid": "73ce8df0-31b6-11e8-8828-00a098d393ea",
+   #           "name": "prod01stg01_1",
+   #           "_links": {
+   #             "self": {
+   #               "href": "/api/cluster/nodes/73ce8df0-31b6-11e8-8828-00a098d393ea"
+   #             }
+   #           }
+   #         },
+   #         "_links": {
+   #           "self": {
+   #             "href": "/api/storage/aggregates/31f413ef-23f2-4805-8468-334d89d4b182"
+   #           }
+   #         }
+   #       } 
+   #     ],
+   #     "num_records": 2,
+   #     "_links": {
+   #       "self": {
+   #         "href": "/api/storage/aggregates"
+   #       }
+   #     }
+   #
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/aggregates\' | $jq '.records[].uuid' ";  
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");	#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([a-zA-Z0-9\-]+)/ ) {
+         $aggr{$1}{uuid} = $1;					#assign value to hash
+         print "   found aggregate with uuid $1 \n" if ($verbose eq "yes");
+      }
+   }								#end of while loop
+   close IN;							#close filehandle
+}                                               		#end of subroutine
+
+
+
+
+sub get_aggregate_details {
+   #
+   print "running get_aggregate_details subroutine \n" if ($verbose eq "yes");
+   #
+   # In a previous subroutine, we got all the aggregate UUID values, which will we now use
+   # to query each aggregate individually to extract details such as space utilization, etc.
+   #
+   foreach $key (sort keys %aggr) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      next unless $key;                                                 #skip any blank lines
+      print "\n   found aggregate with uuid $aggr{$key}{uuid} \n" if ($verbose eq "yes");
+      $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/aggregates/$aggr{$key}{uuid}\' | $jq '{uuid, name, size: .space.block_storage.size, available: .space.block_storage.available, used: .space.block_storage.used}' ";
+
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open (IN,"$cmd 2>&1|");	#open filehandle
+      while (<IN>) {						#read a line from the filehandle
+         s/\"//g; 							#remove embedded quotation marks
+         if ( /name: ([a-zA-Z0-9_\-]+)/ ) {
+            $aggr{$key}{name} = $1;					#assign value to hash
+         }
+         if ( /size: ([0-9]+)/ ) {
+            $aggr{$key}{size} = $1;					#assign value to hash
+         }
+         if ( /available: ([0-9]+)/ ) {
+            $aggr{$key}{available} = $1;					#assign value to hash
+         }
+         if ( /used: ([0-9]+)/ ) {
+            $aggr{$key}{used} = $1;					#assign value to hash
+            print "   found aggregate with uuid:$aggr{$key}{uuid} name:$aggr{$key}{name}  size:$aggr{$key}{size} available:$aggr{$key}{available} used:$aggr{$key}{used} \n" if ($verbose eq "yes");
+         }
+      }								#end of while loop
+      close IN;							#close filehandle
+   }                                               		#end of foreach loop
+}                                               		#end of subroutine
+
+
+
+
+sub get_volume_uuid {
+   #
+   print "running get_volume_uuid subroutine \n" if ($verbose eq "yes");
+   #
+   # Output of command will be similar to the following.
+   # The only JSON key:value pair we are interested in at this level is the top-level instance of uuid,
+   # because that will give us a list of all the volume names, which we will use later.
+   #
+   #  curl -s -X GET -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/storage/volumes'
+   # <details to be added>
+   #
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes\' | $jq '.records[].uuid' ";  
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");	#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([a-zA-Z0-9\-]+)/ ) {
+         $volume{$1}{uuid} = $1;					#assign value to hash
+         print "   found volume with uuid $1 \n" if ($verbose eq "yes");
+      }
+   }								#end of while loop
+   close IN;							#close filehandle
+
+}                                               		#end of subroutine
+
+
+
+
+sub get_volume_details {
+   #
+   print "running get_volume_details subroutine \n" if ($verbose eq "yes");
+   #
+   # In a previous subroutine, we got all the volume UUID values, which will we now use
+   # to query each volume individually to extract details such as space utilization, etc.
+   #
+   # Sample output for each volume:
+   #     /usr/bin/curl -k -s -X GET -u 'MyUserName:MyPassword' 'https://MyNetApp/api/storage/volumes/fdc0a57b-fd06-4af8-b9f9-bb0981cbea5a'
+   #    {
+   #     "uuid": "fdc0a57b-fd06-4af8-b9f9-bb0981cbea5a",
+   #     "comment": "",
+   #     "create_time": "2018-04-24T17:22:27-06:00",
+   #     "language": "en_us",
+   #     "name": "apps",
+   #     "size": 5497558138880,
+   #     "state": "online",
+   #     "style": "flexvol",
+   #     "tiering": {
+   #       "policy": "none"
+   #     },
+   #     "cloud_retrieval_policy": "default",
+   #     "type": "rw",
+   #     "aggregates": [
+   #       {
+   #         "name": "aggr9_8TB_SATA",
+   #         "uuid": "f58db2b2-f683-4bcb-b993-a5310fd07199"
+   #       }
+   #     ],
+   #     "clone": {
+   #       "is_flexclone": false
+   #     },
+   #     "nas": {
+   #       "export_policy": {
+   #         "name": "default"
+   #       }
+   #     },
+   #     "snapshot_policy": {
+   #       "name": "cifs_data"
+   #     },
+   #     "svm": {
+   #       "name": "CAL01SVMCIFS",
+   #       "uuid": "1f0cbe88-43ec-11e8-9723-00a098d57622",
+   #       "_links": {
+   #         "self": {
+   #           "href": "/api/svm/svms/1f0cbe88-43ec-11e8-9723-00a098d57622"
+   #         }
+   #       }
+   #     },
+   #     "space": {
+   #       "size": 5497558138880,
+   #       "available": 2119541121024,
+   #       "used": 3378017017856
+   #     },
+   #     "status": [
+   #       "Volume apps has one or more scanners active."
+   #     ],
+   #     "snapmirror": {
+   #       "is_protected": true,
+   #       "destinations": {
+   #         "is_ontap": true,
+   #         "is_cloud": false
+   #       }
+   #     },
+   #     "metric": {
+   #       "timestamp": "2024-12-16T20:24:30Z",
+   #       "duration": "PT15S",
+   #       "status": "ok",
+   #       "latency": {
+   #         "other": 203,
+   #         "total": 203,
+   #         "read": 97,
+   #         "write": 0
+   #       },
+   #       "iops": {
+   #         "read": 0,
+   #         "write": 0,
+   #         "other": 912,
+   #         "total": 913
+   #       },
+   #       "throughput": {
+   #         "read": 6709,
+   #         "write": 0,
+   #         "other": 0,
+   #         "total": 6709
+   #       }
+   #     },
+   #     "analytics": {
+   #       "state": "off"
+   #     },
+   #     "_links": {
+   #       "self": {
+   #         "href": "/api/storage/volumes/fdc0a57b-fd06-4af8-b9f9-bb0981cbea5a"
+   #       }
+   #     }
+   #   }
+   #
+   #
+   #
+   #
+   foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each volume
+      next unless $key;                                                 #skip any blank lines
+      print "\n   found volume with uuid $volume{$key}{uuid} \n" if ($verbose eq "yes");
+      $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes/$volume{$key}{uuid}\' | $jq '{name, uuid, size: .space.size, available: .space.available, used: .space.used}' ";
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open (IN,"$cmd 2>&1|");	#open filehandle
+      while (<IN>) {						#read a line from the filehandle
+         s/\"//g; 							#remove embedded quotation marks
+         if ( /name: ([a-zA-Z0-9_\-]+)/ ) {
+            $volume{$key}{name} = $1;					#assign value to hash
+         }
+         if ( /size: ([0-9]+)/ ) {
+            $volume{$key}{size} = $1;					#assign value to hash
+         }
+         if ( /available: ([0-9]+)/ ) {
+            $volume{$key}{available} = $1;					#assign value to hash
+         }
+         if ( /used: ([0-9]+)/ ) {
+            $volume{$key}{used} = $1;					#assign value to hash
+            print "   found volume with uuid:$volume{$key}{uuid} name:$volume{$key}{name}  size:$volume{$key}{size} available:$volume{$key}{available} used:$volume{$key}{used} \n" if ($verbose eq "yes");
+         }
+      }								#end of while loop
+      close IN;							#close filehandle
+   }                                               		#end of foreach loop
+}                                               		#end of subroutine
+
+
+sub print_output {
+   #
+   print "Running print_output subroutine \n" if ($verbose eq "yes");
+   #
+   $common_output_data = "";
+   $perf_data = "";    #format is 'label'=value[UOM];warning;critical;min;max
+   #
+   # get the global system health status
+   $common_output_data = "$common_output_data health:$system{health}";
+   print "   found health status $system{health} \n" if ($verbose eq "yes");
+   #
+   # count up the number of nodes
+   my $node_count=0;
+   foreach $key (sort keys %node) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $node_count++;
+   } 								#end of foreach loop
+   print "   found $node_count nodes \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data node_count:$node_count";
+   #
+   # count up any failed fans or power supplies
+   my $failed_fan_count=0;
+   my $failed_power_supply_count=0;
+   foreach $key (sort keys %node) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $failed_fan_count          = $failed_fan_count          + $node{$key}{failed_fan_count};
+      $failed_power_supply_count = $failed_power_supply_count + $node{$key}{failed_power_supply_count};
+   } 								#end of foreach loop
+   $common_output_data = "$common_output_data failed_fan_count:$failed_fan_count failed_power_supply_count:$failed_power_supply_count";
+   #
+   #
+   # Get all the aggregates into the $perf_data output
+   foreach $key (sort keys %aggr) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $perf_data = "$perf_data $aggr{$key}{name}=$aggr{$key}{used};;0;$aggr{$key}{size}; ";
+   } 								#end of foreach loop
+   #
+   # Get all the volumes into the $perf_data output
+   foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      next unless $volume{$key}{name};				#skip any missing hash keys
+      next unless $volume{$key}{used};				#skip any missing hash keys
+      next unless $volume{$key}{size};				#skip any missing hash keys
+      $perf_data = "$perf_data $volume{$key}{name}=$volume{$key}{used};;0;$volume{$key}{size}; ";
+   } 								#end of foreach loop
+   #
+   #
+   # print output
+   #
+   if ( ($failed_fan_count > 0) && ($system{health} eq "ok") ) {
+      print "$CHECK_NAME WARN - Fan failure.  $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }
+   if ( ($failed_power_supply_count > 0) && ($system{health} eq "ok") ) {
+      print "$CHECK_NAME WARN - Power supply failure.  $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }
+   if ($system{health} ne "ok") {
+      print "$CHECK_NAME WARN - system health is $system{health}, please check with CLI commands: system health status show, system health alert show.  $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }
+   
+   # we only get this far if no problems were found
+   print "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
+   exit $OK;
+
+}			#end of subroutine
+
+
+
+
+# ---------------- main body of script -------------------------
+get_options;
+sanity_checks;
+check_for_output_file;
+get_system_health;
+get_node_uuid;
+get_node_details;
+get_aggregate_uuid;
+get_aggregate_details;
+get_volume_uuid;
+get_volume_details;
+print_output;
+
+
+
+
+
+

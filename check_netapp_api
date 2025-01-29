@@ -847,12 +847,12 @@ sub print_output {
    $common_output_data = "$common_output_data node_count:$node_count";
    #
    # count up the number of aggregates
-   my $aggregate_count=0;
-   foreach $key (sort keys %aggregate) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
-      $aggregate_count++;
+   my $aggr_count=0;
+   foreach $key (sort keys %aggr) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $aggr_count++;
    } 								#end of foreach loop
-   print "   found $aggregate_count aggregates \n" if ($verbose eq "yes");
-   $common_output_data = "$common_output_data aggregate_count:$aggregate_count";
+   print "   found $aggr_count aggregates \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data aggregate_count:$aggr_count";
    #
    # count up the number of volumes
    my $volume_count=0;

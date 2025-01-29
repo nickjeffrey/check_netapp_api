@@ -970,7 +970,7 @@ sub print_output {
    #
    # Get all the aggregates total space and used space into the $perf_data output
    foreach $key (sort keys %aggr) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
-      $perf_data = "$perf_data $aggr{$key}{name}=$aggr{$key}{used};;0;$aggr{$key}{size}; ";
+      $perf_data = "$perf_data $aggr{$key}{name}=$aggr{$key}{used};;;;$aggr{$key}{size}; ";
    } 								#end of foreach loop
    #
    # Get all the volumes total space and used space into the $perf_data output
@@ -978,7 +978,7 @@ sub print_output {
       next unless $volume{$key}{name};				#skip any missing hash keys
       next unless $volume{$key}{used};				#skip any missing hash keys
       next unless $volume{$key}{size};				#skip any missing hash keys
-      $perf_data = "$perf_data $volume{$key}{name}=$volume{$key}{used};;0;$volume{$key}{size}; ";
+      $perf_data = "$perf_data $volume{$key}{name}=$volume{$key}{used};;;;$volume{$key}{size}; ";
    } 								#end of foreach loop
    #
    # Look for any aggregates with low free space

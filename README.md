@@ -34,5 +34,11 @@ You will also need a command definition similar to the following in commands.cfg
 # Output
 You will see output similar to the following
 ```
-    NetApp OK -  health:ok node_count:2 failed_fan_count:0 failed_power_supply_count:0
+    NetApp OK - health:ok ontap_version:9.16.1 node_count:2 aggregate_count:2 volume_count:7 failed_fan_count:0 failed_power_supply_count:0
+```
+```
+    NetApp WARN - Aggregate aggr1 is 92% full.  health:ok ontap_version:9.16.1 node_count:2 aggregate_count:2 volume_count:7 failed_fan_count:0 failed_power_supply_count:0
+```
+```
+    NetApp WARN - Volume vol1 is 94% full.  health:ok ontap_version:9.16.1 node_count:2 aggregate_count:2 volume_count:7 failed_fan_count:0 failed_power_supply_count:0
 ```

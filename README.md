@@ -6,9 +6,9 @@ perl, jq, usernname and password credentials with API access on NetApp ONTAP sto
 
 # Configuration
 
-Create a username/password on the NetApp ONTAP storage system with API privileges.  For example:
+Create a username/password on the NetApp ONTAP storage system with access to the REST API.  For example:
 ```
-   security login create -username nagios -application http,ontapi -authmethod password -role admin
+   security login create -username nagios -application http,ontapi -authmethod password -role readonly
 ```
 
 

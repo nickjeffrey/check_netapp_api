@@ -1,5 +1,5 @@
 # check_netapp_api
-nagios check for NetApp ONTAP storage system health using HTTPS API
+nagios check for NetApp ONTAP storage system health using HTTPS-based REST API
 
 # Requirements
 perl, jq, usernname and password credentials with API access on NetApp ONTAP storage

@@ -10,8 +10,9 @@
 # CHANGE LOG
 # ----------
 #  2024-12-16	njeffrey	Script created
-#  2025-11-13	njeffrey	Add error check to confirm --user=XXX --password=YYY parameters were provided
-#  2025-11-13	njeffrey	Add get_system_health subroutine
+#  2025-01-13	njeffrey	Add error check to confirm --user=XXX --password=YYY parameters were provided
+#  2025-01-13	njeffrey	Add get_system_health subroutine
+#  2025-01-29	njeffrey	Add $aggregate_count and $volume_count to output
 
 
 
@@ -21,8 +22,8 @@
 
 # CONFIGURATION
 # -------------
-# Create a username/password on the NetApp ONTAP storage system with API privileges
-# <add details here>
+# Create a username/password on the NetApp ONTAP storage system with access to the REST API.
+# cluster::> security login create -username nagios -application http,ontapi -authmethod password -role readonly
 
 # You will need a section in the services.cfg file on the nagios server that looks similar to the following.
 #    # Define service to peform SNMP queries against remote AIX machine to confirm AIX SNMP daemons are running
@@ -845,6 +846,22 @@ sub print_output {
    print "   found $node_count nodes \n" if ($verbose eq "yes");
    $common_output_data = "$common_output_data node_count:$node_count";
    #
+   # count up the number of aggregates
+   my $aggregate_count=0;
+   foreach $key (sort keys %aggregate) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $aggregate_count++;
+   } 								#end of foreach loop
+   print "   found $aggregate_count aggregates \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data aggregate_count:$aggregate_count";
+   #
+   # count up the number of volumes
+   my $volume_count=0;
+   foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      $volume_count++;
+   } 								#end of foreach loop
+   print "   found $volume_count volumes \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data volume_count:$volume_count";
+   #
    # count up any failed fans or power supplies
    my $failed_fan_count=0;
    my $failed_power_supply_count=0;
@@ -855,12 +872,12 @@ sub print_output {
    $common_output_data = "$common_output_data failed_fan_count:$failed_fan_count failed_power_supply_count:$failed_power_supply_count";
    #
    #
-   # Get all the aggregates into the $perf_data output
+   # Get all the aggregates total space and used space into the $perf_data output
    foreach $key (sort keys %aggr) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
       $perf_data = "$perf_data $aggr{$key}{name}=$aggr{$key}{used};;0;$aggr{$key}{size}; ";
    } 								#end of foreach loop
    #
-   # Get all the volumes into the $perf_data output
+   # Get all the volumes total space and used space into the $perf_data output
    foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
       next unless $volume{$key}{name};				#skip any missing hash keys
       next unless $volume{$key}{used};				#skip any missing hash keys

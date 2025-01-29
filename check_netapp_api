@@ -12,7 +12,7 @@
 #  2024-12-16	njeffrey	Script created
 #  2025-01-13	njeffrey	Add error check to confirm --user=XXX --password=YYY parameters were provided
 #  2025-01-13	njeffrey	Add get_system_health subroutine
-#  2025-01-29	njeffrey	Add $aggregate_count and $volume_count to output
+#  2025-01-29	njeffrey	Add $aggregate_count, $volume_count, $ontap_version to output
 
 
 
@@ -64,12 +64,16 @@ my ($epoch_seconds_timestamp,$epoch_seconds_now);
 my ($output_filename,$output_file_age,$output_message,$common_output_data,$perf_data,$verbose);
 my ($opt_H,$opt_u,$opt_p,$opt_h,$opt_v,$opt_w,$opt_c);
 my ($bytes_warn,$bytes_crit);
+my ($aggr_full_threshold_warn,$volume_full_threshold_warn);
+my ($ontap_version,$ontap_version_generation,$ontap_version_major,$ontap_version_minor);
 my ($user,$password,$host);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
 $verbose    = "no";						#yes|no flag to increase verbosity for debugging
 $CHECK_NAME = "NetApp";
-$curl       = "/usr/bin/curl";         #location of binary
-$jq         = "/usr/bin/jq";         #location of binary
+$curl       = "/usr/bin/curl";         				#location of binary
+$jq         = "/usr/bin/jq";         				#location of binary
+$aggr_full_threshold_warn = 90;					#percentagle full warning threshold
+$volume_full_threshold_warn = 90;				#percentable full warning threshold
 #
 # Nagios return codes
 #
@@ -269,6 +273,46 @@ sub print_to_outputfile {
    }                                                                            #end of if block
 }                                                                               #end of subroutine
 
+
+sub get_ontap_version {
+   #
+   print "running get_ontap_version subroutine \n" if ($verbose eq "yes");
+   #
+   # Output of command will be similar to the following.
+   #
+   #  curl -s -X GET -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/cluster'
+   #   {
+   #     "name": "cluster01",
+   #     "uuid": "20a69a2e-d7ec-11ef-b115-xxxxyyyyzzzz",
+   #     "location": "BigCorp Datacenter, 123 Fake Street, Anytown",
+   #     "version": {
+   #       "full": "NetApp Release 9.16.1RC1: Mon Nov 04 10:39:46 UTC 2024",
+   #       "generation": 9,
+   #       "major": 16,
+   #       "minor": 1
+   #
+   $ontap_version = "unknown";					#initialize variable to avoid undef errors
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/cluster' | $jq '{generation, major, minor, generation: .version.generation, major: .version.major, minor: .version.minor}'";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");	#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /generation: ([0-9]+)/ ) {
+         $ontap_version_generation = $1;					#assign value to hash
+      }
+      if ( /major: ([0-9]+)/ ) {
+         $ontap_version_major = $1;					#assign value to hash
+      }
+      if ( /minor: ([0-9]+)/ ) {
+         $ontap_version_minor = $1;					#assign value to hash
+      }
+   }								#end of while loop
+   close IN;							#close filehandle
+   if ( ($ontap_version_generation) && ($ontap_version_major) && ($ontap_version_minor) ) {  #confirm values exist
+      $ontap_version = "$ontap_version_generation.$ontap_version_major.$ontap_version_minor";
+   }
+   print "   ontap_version:$ontap_version \n" if ($verbose eq "yes");
+}                                                                               #end of subroutine
 
 
 sub get_system_health {
@@ -662,10 +706,34 @@ sub get_aggregate_details {
          }
          if ( /used: ([0-9]+)/ ) {
             $aggr{$key}{used} = $1;					#assign value to hash
-            print "   found aggregate with uuid:$aggr{$key}{uuid} name:$aggr{$key}{name}  size:$aggr{$key}{size} available:$aggr{$key}{available} used:$aggr{$key}{used} \n" if ($verbose eq "yes");
          }
       }								#end of while loop
       close IN;							#close filehandle
+      #
+      # At this point, we have the aggregate size in bytes, let's use that to calculate the more human-readable TB and pcercent
+      #
+      if ( ($aggr{$key}{used}) && ($aggr{$key}{size}) && ($aggr{$key}{available}) ) {
+         #
+         $aggr{$key}{used_pct} = $aggr{$key}{used} / $aggr{$key}{size};
+         $aggr{$key}{used_pct} = sprintf( "%.0f", $aggr{$key}{used_pct});              	#truncate to 0 decimal place
+         #
+         $aggr{$key}{size_pct} = $aggr{$key}{size} / $aggr{$key}{size};
+         $aggr{$key}{size_pct} = sprintf( "%.0f", $aggr{$key}{size_pct});              	#truncate to 0 decimal place
+         #
+         $aggr{$key}{available_pct} = $aggr{$key}{available} / $aggr{$key}{size};
+         $aggr{$key}{available_pct} = sprintf( "%.0f", $aggr{$key}{available_pct});    	#truncate to 0 decimal place
+         #
+         $aggr{$key}{used_tb} = $aggr{$key}{used} /1024/1024/1024/1024;			#convert bytes to TB
+         $aggr{$key}{used_tb} = sprintf( "%.1f", $aggr{$key}{used_tb});              	#truncate to 1 decimal place
+         #
+         $aggr{$key}{size_tb} = $aggr{$key}{size} /1024/1024/1024/1024;			#convert bytes to TB
+         $aggr{$key}{size_tb} = sprintf( "%.1f", $aggr{$key}{size_tb});              	#truncate to 1 decimal place
+         #
+         $aggr{$key}{available_tb} = $aggr{$key}{available} /1024/1024/1024/1024;		#convert bytes to TB
+         $aggr{$key}{available_tb} = sprintf( "%.1f", $aggr{$key}{available_tb});         	#truncate to 1 decimal place
+         #
+         print "   found aggregate with uuid:$aggr{$key}{uuid} name:$aggr{$key}{name}  size_bytes:$aggr{$key}{size} available_bytes:$aggr{$key}{available} used_bytes:$aggr{$key}{used} size_tb:$aggr{$key}{size_tb} available_tb:$aggr{$key}{available_tb}  used_tb:$aggr{$key}{used_tb} used_pct:$aggr{$key}{used_pct} \n" if ($verbose eq "yes");
+      }								#end of if block
    }                                               		#end of foreach loop
 }                                               		#end of subroutine
 
@@ -800,29 +868,53 @@ sub get_volume_details {
    #
    #
    #
-   foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each volume
-      next unless $key;                                                 #skip any blank lines
+   foreach $key (sort keys %volume) {                          	#loop through for each key value in hash, which is the uuid of each volume
+      next unless $key;                                        	#skip any blank lines
       print "\n   found volume with uuid $volume{$key}{uuid} \n" if ($verbose eq "yes");
       $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes/$volume{$key}{uuid}\' | $jq '{name, uuid, size: .space.size, available: .space.available, used: .space.used}' ";
       print "   running command: $cmd \n" if ($verbose eq "yes");
-      open (IN,"$cmd 2>&1|");	#open filehandle
+      open (IN,"$cmd 2>&1|");					#open filehandle
       while (<IN>) {						#read a line from the filehandle
-         s/\"//g; 							#remove embedded quotation marks
+         s/\"//g; 						#remove embedded quotation marks
          if ( /name: ([a-zA-Z0-9_\-]+)/ ) {
-            $volume{$key}{name} = $1;					#assign value to hash
+            $volume{$key}{name} = $1;				#assign value to hash
          }
          if ( /size: ([0-9]+)/ ) {
-            $volume{$key}{size} = $1;					#assign value to hash
+            $volume{$key}{size} = $1;				#assign value to hash
          }
          if ( /available: ([0-9]+)/ ) {
-            $volume{$key}{available} = $1;					#assign value to hash
+            $volume{$key}{available} = $1;			#assign value to hash
          }
          if ( /used: ([0-9]+)/ ) {
-            $volume{$key}{used} = $1;					#assign value to hash
-            print "   found volume with uuid:$volume{$key}{uuid} name:$volume{$key}{name}  size:$volume{$key}{size} available:$volume{$key}{available} used:$volume{$key}{used} \n" if ($verbose eq "yes");
+            $volume{$key}{used} = $1;				#assign value to hash
          }
       }								#end of while loop
       close IN;							#close filehandle
+      #
+      # At this point, we have the volume size in bytes, let's use that to calculate the more human-readable TB and pcercent
+      #
+      if ( ($volume{$key}{used}) && ($volume{$key}{size}) && ($volume{$key}{available}) ) {
+         #
+         $volume{$key}{used_pct} = $volume{$key}{used} / $volume{$key}{size};
+         $volume{$key}{used_pct} = sprintf( "%.0f", $volume{$key}{used_pct});              	#truncate to 0 decimal place
+         #
+         $volume{$key}{size_pct} = $volume{$key}{size} / $volume{$key}{size};
+         $volume{$key}{size_pct} = sprintf( "%.0f", $volume{$key}{size_pct});              	#truncate to 0 decimal place
+         #
+         $volume{$key}{available_pct} = $volume{$key}{available} / $volume{$key}{size};
+         $volume{$key}{available_pct} = sprintf( "%.0f", $volume{$key}{available_pct});    	#truncate to 0 decimal place
+         #
+         $volume{$key}{used_tb} = $volume{$key}{used} /1024/1024/1024/1024;			#convert bytes to TB
+         $volume{$key}{used_tb} = sprintf( "%.1f", $volume{$key}{used_tb});              	#truncate to 1 decimal place
+         #
+         $volume{$key}{size_tb} = $volume{$key}{size} /1024/1024/1024/1024;			#convert bytes to TB
+         $volume{$key}{size_tb} = sprintf( "%.1f", $volume{$key}{size_tb});              	#truncate to 1 decimal place
+         #
+         $volume{$key}{available_tb} = $volume{$key}{available} /1024/1024/1024/1024;		#convert bytes to TB
+         $volume{$key}{available_tb} = sprintf( "%.1f", $volume{$key}{available_tb});         	#truncate to 1 decimal place
+         #
+         print "   found volume with uuid:$volume{$key}{uuid} name:$volume{$key}{name}  size_bytes:$volume{$key}{size} available_bytes:$volume{$key}{available} used_bytes:$volume{$key}{used} size_tb:$volume{$key}{size_tb} available_tb:$volume{$key}{available_tb}  used_tb:$volume{$key}{used_tb} used_pct:$volume{$key}{used_pct} \n" if ($verbose eq "yes");
+      }								#end of if block
    }                                               		#end of foreach loop
 }                                               		#end of subroutine
 
@@ -837,6 +929,10 @@ sub print_output {
    # get the global system health status
    $common_output_data = "$common_output_data health:$system{health}";
    print "   found health status $system{health} \n" if ($verbose eq "yes");
+   #
+   # get the ONTAP version
+   $common_output_data = "$common_output_data ontap_version:$ontap_version";
+   print "   found ONTAP version $ontap_version \n" if ($verbose eq "yes");
    #
    # count up the number of nodes
    my $node_count=0;
@@ -885,6 +981,26 @@ sub print_output {
       $perf_data = "$perf_data $volume{$key}{name}=$volume{$key}{used};;0;$volume{$key}{size}; ";
    } 								#end of foreach loop
    #
+   # Look for any aggregates with low free space
+   my $aggr_full_count = 0;					#initialize counter variable
+   foreach $key (sort keys %aggr) {                             #loop through for each key value in hash, which is the uuid of each aggregate
+      if ($aggr{$key}{used_pct} > $aggr_full_threshold_warn) {
+         $aggr_full_count++;					#increment counter variable
+         $common_output_data = "Aggregate $aggr{$key}{name} is $aggr{$key}{used_pct}\% full.  $common_output_data ";
+         print "   Aggregate $aggr{$key}{name} is $aggr{$key}{used_pct}\% full. \n" if ($verbose eq "yes");
+      } 								#end of foreach loop
+   } 								#end of foreach loop
+   #
+   # Look for any volumes with low free space
+   my $volume_full_count = 0;					#initialize counter variable
+   foreach $key (sort keys %volume) {                           #loop through for each key value in hash, which is the uuid of each volume
+      if ($volume{$key}{used_pct} > $volume_full_threshold_warn) {
+         $volume_full_count++;					#increment counter variable
+         $common_output_data = "Volume $volume{$key}{name} is $volume{$key}{used_pct}\% full.  $common_output_data ";
+         print "   Aggregate $volume{$key}{name} is $volume{$key}{used_pct}\% full. \n" if ($verbose eq "yes");
+      } 								#end of foreach loop
+   } 								#end of foreach loop
+   #
    #
    # print output
    #
@@ -900,7 +1016,11 @@ sub print_output {
       print "$CHECK_NAME WARN - system health is $system{health}, please check with CLI commands: system health status show, system health alert show.  $common_output_data | $perf_data  \n";
       exit $WARN;
    }
-   
+   if ( ($aggr_full_count > 0) || ($volume_full_count > 0) ) {		
+      print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }
+   # 
    # we only get this far if no problems were found
    print "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
    exit $OK;
@@ -914,6 +1034,7 @@ sub print_output {
 get_options;
 sanity_checks;
 check_for_output_file;
+get_ontap_version;
 get_system_health;
 get_node_uuid;
 get_node_details;

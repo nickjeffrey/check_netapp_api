@@ -692,8 +692,8 @@ sub get_aggregate_details {
       $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/aggregates/$aggr{$key}{uuid}\' | $jq '{uuid, name, size: .space.block_storage.size, available: .space.block_storage.available, used: .space.block_storage.used}' ";
 
       print "   running command: $cmd \n" if ($verbose eq "yes");
-      open (IN,"$cmd 2>&1|");	#open filehandle
-      while (<IN>) {						#read a line from the filehandle
+      open (IN,"$cmd 2>&1|");						#open filehandle
+      while (<IN>) {							#read a line from the filehandle
          s/\"//g; 							#remove embedded quotation marks
          if ( /name: ([a-zA-Z0-9_\-]+)/ ) {
             $aggr{$key}{name} = $1;					#assign value to hash
@@ -702,25 +702,25 @@ sub get_aggregate_details {
             $aggr{$key}{size} = $1;					#assign value to hash
          }
          if ( /available: ([0-9]+)/ ) {
-            $aggr{$key}{available} = $1;					#assign value to hash
+            $aggr{$key}{available} = $1;				#assign value to hash
          }
          if ( /used: ([0-9]+)/ ) {
             $aggr{$key}{used} = $1;					#assign value to hash
          }
-      }								#end of while loop
-      close IN;							#close filehandle
+      }									#end of while loop
+      close IN;								#close filehandle
       #
       # At this point, we have the aggregate size in bytes, let's use that to calculate the more human-readable TB and pcercent
       #
       if ( ($aggr{$key}{used}) && ($aggr{$key}{size}) && ($aggr{$key}{available}) ) {
          #
-         $aggr{$key}{used_pct} = $aggr{$key}{used} / $aggr{$key}{size};
+         $aggr{$key}{used_pct} = $aggr{$key}{used} / $aggr{$key}{size} * 100;		#calculate percentage 
          $aggr{$key}{used_pct} = sprintf( "%.0f", $aggr{$key}{used_pct});              	#truncate to 0 decimal place
          #
-         $aggr{$key}{size_pct} = $aggr{$key}{size} / $aggr{$key}{size};
+         $aggr{$key}{size_pct} = $aggr{$key}{size} / $aggr{$key}{size} * 100;		#calculate percentage 
          $aggr{$key}{size_pct} = sprintf( "%.0f", $aggr{$key}{size_pct});              	#truncate to 0 decimal place
          #
-         $aggr{$key}{available_pct} = $aggr{$key}{available} / $aggr{$key}{size};
+         $aggr{$key}{available_pct} = $aggr{$key}{available} / $aggr{$key}{size} * 100;	#calculate percentage 
          $aggr{$key}{available_pct} = sprintf( "%.0f", $aggr{$key}{available_pct});    	#truncate to 0 decimal place
          #
          $aggr{$key}{used_tb} = $aggr{$key}{used} /1024/1024/1024/1024;			#convert bytes to TB
@@ -895,13 +895,13 @@ sub get_volume_details {
       #
       if ( ($volume{$key}{used}) && ($volume{$key}{size}) && ($volume{$key}{available}) ) {
          #
-         $volume{$key}{used_pct} = $volume{$key}{used} / $volume{$key}{size};
+         $volume{$key}{used_pct} = $volume{$key}{used} / $volume{$key}{size} * 100;		#calculate percentage 
          $volume{$key}{used_pct} = sprintf( "%.0f", $volume{$key}{used_pct});              	#truncate to 0 decimal place
          #
-         $volume{$key}{size_pct} = $volume{$key}{size} / $volume{$key}{size};
+         $volume{$key}{size_pct} = $volume{$key}{size} / $volume{$key}{size} * 100;		#calculate percentage 
          $volume{$key}{size_pct} = sprintf( "%.0f", $volume{$key}{size_pct});              	#truncate to 0 decimal place
          #
-         $volume{$key}{available_pct} = $volume{$key}{available} / $volume{$key}{size};
+         $volume{$key}{available_pct} = $volume{$key}{available} / $volume{$key}{size} * 100;	#calculate percentage 
          $volume{$key}{available_pct} = sprintf( "%.0f", $volume{$key}{available_pct});    	#truncate to 0 decimal place
          #
          $volume{$key}{used_tb} = $volume{$key}{used} /1024/1024/1024/1024;			#convert bytes to TB

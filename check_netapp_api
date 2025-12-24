@@ -13,6 +13,8 @@
 #  2025-01-13	njeffrey	Add error check to confirm --user=XXX --password=YYY parameters were provided
 #  2025-01-13	njeffrey	Add get_system_health subroutine
 #  2025-01-29	njeffrey	Add $aggregate_count, $volume_count, $ontap_version to output
+#  2025-12-24	njeffrey	Add $total_disk_count,$spare_disk_count to output
+#  2025-12-24	njeffrey	Add get_ems_log_messages subroutine
 
 
 
@@ -67,6 +69,7 @@ my ($bytes_warn,$bytes_crit);
 my ($aggr_full_threshold_warn,$volume_full_threshold_warn);
 my ($ontap_version,$ontap_version_generation,$ontap_version_major,$ontap_version_minor);
 my ($user,$password,$host);
+my ($total_disk_count,$spare_disk_count,$ems_log_count,$ems_log_messages);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
 $verbose    = "no";						#yes|no flag to increase verbosity for debugging
 $CHECK_NAME = "NetApp";
@@ -144,6 +147,9 @@ sub get_options {
    if( defined( $opt_H ) ) {
       $host = $opt_H;
       print "   setting remote host to $host \n" if ($verbose eq "yes");
+   } else {
+      print "ERROR: please provide --host=SomeHostnameOrIPaddr parameter, or use --help  \n";
+      exit $UNKNOWN;
    }
    #
    # If the user provided -u or --user parameter, use that value as the username on the remote device
@@ -299,16 +305,19 @@ sub get_ontap_version {
       s/\"//g; 							#remove embedded quotation marks
       if ( /generation: ([0-9]+)/ ) {
          $ontap_version_generation = $1;					#assign value to hash
+         print "   ontap_version_generation:$ontap_version_generation \n" if ($verbose eq "yes");
       }
       if ( /major: ([0-9]+)/ ) {
          $ontap_version_major = $1;					#assign value to hash
+         print "   ontap_version_major:$ontap_version_major \n" if ($verbose eq "yes");
       }
       if ( /minor: ([0-9]+)/ ) {
          $ontap_version_minor = $1;					#assign value to hash
+         print "   ontap_version_minor:$ontap_version_minor \n" if ($verbose eq "yes");
       }
    }								#end of while loop
    close IN;							#close filehandle
-   if ( ($ontap_version_generation) && ($ontap_version_major) && ($ontap_version_minor) ) {  #confirm values exist
+   if ( defined($ontap_version_generation) && defined($ontap_version_major) && defined($ontap_version_minor) ) {  #confirm values exist
       $ontap_version = "$ontap_version_generation.$ontap_version_major.$ontap_version_minor";
    }
    print "   ontap_version:$ontap_version \n" if ($verbose eq "yes");
@@ -568,6 +577,14 @@ sub get_node_details {
    foreach $key (sort keys %node) {                                      #loop through for each key value in hash, which is the uuid of each clust4er node
       next unless $key;                                                 #skip any blank lines
       print "\n   found node with uuid $node{$key}{uuid} \n" if ($verbose eq "yes");
+      #
+      $node{$key}{name} = "unknown";					#initialize hash element to avoid undef errors
+      $node{$key}{serial_number} = "unknown";				#initialize hash element to avoid undef errors
+      $node{$key}{model} = "unknown";					#initialize hash element to avoid undef errors
+      $node{$key}{failed_fan_count} = 0;				#initialize hash element to avoid undef errors
+      $node{$key}{battery_state} = "unknown";				#initialize hash element to avoid undef errors
+      $node{$key}{failed_power_supply_count} = 0;			#initialize hash element to avoid undef errors
+      #
       $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/cluster/nodes/$node{$key}{uuid}\' | $jq '{name, serial_number, model, failed_fan_count: .controller.failed_fan.count, failed_power_supply_count: .controller.failed_power_supply.count, battery_state: .nvram.battery_state}'  ";
 
       print "   running command: $cmd \n" if ($verbose eq "yes");
@@ -591,10 +608,10 @@ sub get_node_details {
          }
          if ( /failed_power_supply_count: ([0-9]+)/ ) {
             $node{$key}{failed_power_supply_count} = $1;					#assign value to hash
-            print "   found node with uuid:$node{$key}{uuid} name:$node{$key}{name}  serial_number$node{$key}{serial_number} model:$node{$key}{model} failed_fan_count:$node{$key}{failed_fan_count} failed_power_supply_count:$node{$key}{failed_power_supply_count} \n" if ($verbose eq "yes");
          }
       }								#end of while loop
       close IN;							#close filehandle
+      print "   found node with uuid:$node{$key}{uuid} name:$node{$key}{name}  serial_number:$node{$key}{serial_number} model:$node{$key}{model} failed_fan_count:$node{$key}{failed_fan_count} failed_power_supply_count:$node{$key}{failed_power_supply_count} \n" if ($verbose eq "yes");
    }                                               		#end of foreach loop
 }                                               		#end of subroutine
 
@@ -919,6 +936,155 @@ sub get_volume_details {
 }                                               		#end of subroutine
 
 
+
+sub get_total_disk_count {
+   #
+   print "running get_total_disk_count subroutine \n" if ($verbose eq "yes");
+   #
+   # Sample output for total disk count
+   #     /usr/bin/curl -k -s -X GET -u 'MyUserName:MyPassword' 'https://MyNetApp/api/storage/disks | jq -r '.num_records'
+   #
+   #  "records": [ 
+   #    {
+   #      "name": "3.33.2",
+   #      "_links": {
+   #        "self": {
+   #          "href": "/api/storage/disks/3.33.2"
+   #        }
+   #      }
+   #    },
+   #    {
+   #      "name": "3.33.1",
+   #      "_links": {
+   #        "self": {
+   #          "href": "/api/storage/disks/3.33.1"
+   #        }
+   #      }
+   #    },
+   #    <snipped> 
+   #  ],
+   #  "num_records": 166,     <---- this is the total number of physical disks that we are interested in
+   #  "_links": {
+   #    "self": {
+   #      "href": "/api/storage/disks"
+   #    }
+   #  }
+   #}
+   #
+   #
+   $total_disk_count = "unknown";				#initialize variable to avoid undef errors
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/disks\' | $jq -r '.num_records' ";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");					#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([0-9]+)/ ) {
+         $total_disk_count = $1;				#assign value to variable
+      }								#end of if block
+   }								#end of while loop
+   close IN;							#close filehandle
+   #
+   print "   total_disk_count:$total_disk_count \n" if ($verbose eq "yes");
+}                                               		#end of subroutine
+
+
+
+sub get_spare_disk_count {
+   #
+   print "running get_spare_disk_count subroutine \n" if ($verbose eq "yes");
+   #
+   # Sample output for total disk count
+   #     /usr/bin/curl -k -s -X GET -u 'MyUserName:MyPassword' 'https://MyNetApp/api/storage/aggregates?show_spares=true' | jq '[.spares[] | .usable] | add'
+   #     10
+   #
+   # Another (less recommended) method to get spare disk count is to query the disks portion of the API, but this generates more output.
+   # 'https://MyNetApp/api/storage/disks?fields=container_type&max_records=1000' | jq '[.records[] | select(.container_type=="spare")] | length'
+   #
+   $spare_disk_count = 0;					#initialize variable to avoid undef errors
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/aggregates?show_spares=true\' | $jq '[.spares[] | .usable] | add' ";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");					#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /([0-9]+)/ ) {
+         $spare_disk_count = $1;				#assign value to variable
+      }								#end of if block
+   }								#end of while loop
+   close IN;							#close filehandle
+   #
+   print "   spare_disk_count:$spare_disk_count \n" if ($verbose eq "yes");
+}                                               		#end of subroutine
+
+
+
+
+sub get_ems_log_messages {
+   #
+   print "running get_ems_log_messages subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   $ems_log_messages = "";					#initialize variable to avoid undef errors
+   $ems_log_count    = 0;					#initialize variable to avoid undef errors
+   #
+   # Look for messages related to FIPS errors
+   # This would occur if a FIPS-certifed encrypting drive is inserted in node that lacks the required licensing.
+   # Note that use use max_records=1 to only get a single message, this avoids duplicates because all cluster nodes will report the same message.
+   # This max_records=1 does mean that the $ems_log_count counter is only known to be greater than zero, but we do not really know the actual number.
+   #
+   # Sample output from checking the EMS event log for recent "FIPS not supported" events
+   # Note that the message output may only show the name of the first of serveral unsupported disks.
+   # Note that you may see duplicate messages, because the same alert is reported by all cluster nodes, we use max_records=1 to only show the first message.
+   # curl -k -s -X GET -u 'MyUserName:MyPassword' 'https://MyNetApp/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.encryptNoSupport&max_records=10' | jq -r '.records[]? | "\(.node.name): \(.message.name): \(.log_message // "")"'
+   #   MyNetApp-01: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 2 of 168 disks checked are FIPS-certified.
+   #   MyNetApp-01: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 2 of 168 disks checked are FIPS-certified.
+   #   MyNetApp-01: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 1 of 168 disks checked are FIPS-certified.
+   #   MyNetApp-02: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 1 of 168 disks checked are FIPS-certified.
+   #   MyNetApp-02: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 1 of 168 disks checked are FIPS-certified.
+   #
+   #
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.encryptNoSupport&max_records=1\' ";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");					#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /(disk.encryptNoSupport: .*)/ ) {
+         $ems_log_count++;					#increment counter variable
+         $ems_log_messages = "$ems_log_messages, $1"; 		#append EMS log message to variable
+      }								#end of if block
+   }								#end of while loop
+   close IN;							#close filehandle
+   #
+   #
+   #
+   # Look for messages related to disk initialization error
+   # This would occur if an unsupported drive is inserted in a node
+   # Note that this may also appear at the same time as the previous FIPS-related message, it refers to the same issue.
+   #
+   # Sample output from checking the EMS event log for recent disk.init.err.unsupported events
+   # curl -s -u 'MyUserName:MyPassword' -k 'https://MyNetApp/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.init.err.unsupported&max_records=1' | jq -r '.records[]? | "\(.node.name): \(.message.name): \(.log_message // "")"'
+   # MyNetApp-01: disk.init.err.unsupported: disk.init.err.unsupported: Disk 1c.29.19 is not recognized as a supported disk and cannot be used on this node.
+   # MyNetApp-02: disk.init.err.unsupported: disk.init.err.unsupported: Disk 1c.29.19 is not recognized as a supported disk and cannot be used on this node.
+   # MyNetApp-01: disk.init.err.unsupported: disk.init.err.unsupported: Disk 0c.32.9  is not recognized as a supported disk and cannot be used on this node.
+   # MyNetApp-02: disk.init.err.unsupported: disk.init.err.unsupported: Disk 0c.32.9  is not recognized as a supported disk and cannot be used on this node.
+   #
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.init.err.unsupported&max_records=1\' ";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open (IN,"$cmd 2>&1|");					#open filehandle
+   while (<IN>) {						#read a line from the filehandle
+      s/\"//g; 							#remove embedded quotation marks
+      if ( /(disk.init.err.unsupported: .*)/ ) {
+         $ems_log_count++;					#increment counter variable
+         $ems_log_messages = "$ems_log_messages, $1"; 		#append EMS log message to variable
+      }								#end of if block
+   }								#end of while loop
+   close IN;							#close filehandle
+   print "   ems_log_count:$ems_log_count \n" if ($verbose eq "yes");
+   print "   ems_log_messages:$ems_log_messages \n" if ($verbose eq "yes");
+}                                               		#end of subroutine
+
+
+
+
 sub print_output {
    #
    print "Running print_output subroutine \n" if ($verbose eq "yes");
@@ -1001,6 +1167,14 @@ sub print_output {
       } 								#end of foreach loop
    } 								#end of foreach loop
    #
+   # Display the total count of disks and number of spare disks
+   $common_output_data = "$common_output_data total_disk_count:$total_disk_count spare_disk_count:$spare_disk_count";
+   #
+   #
+   # Look for any EMS event log error messages, add to output message if found
+   if ($ems_log_count > 0) {
+      $common_output_data = "Please check EMS log with \"event log show\".  $ems_log_messages , $common_output_data ";
+   }
    #
    # print output
    #
@@ -1017,6 +1191,10 @@ sub print_output {
       exit $WARN;
    }
    if ( ($aggr_full_count > 0) || ($volume_full_count > 0) ) {		
+      print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }
+   if ($ems_log_count > 0) {		#details already added to $common_output_data
       print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
       exit $WARN;
    }
@@ -1042,10 +1220,9 @@ get_aggregate_uuid;
 get_aggregate_details;
 get_volume_uuid;
 get_volume_details;
+get_total_disk_count;
+get_spare_disk_count;
+get_ems_log_messages;
 print_output;
-
-
-
-
 
 

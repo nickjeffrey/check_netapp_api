@@ -1026,6 +1026,20 @@ sub get_ems_log_messages {
    $ems_log_messages = "";					#initialize variable to avoid undef errors
    $ems_log_count    = 0;					#initialize variable to avoid undef errors
    #
+   # The ONTAP REST API expects a timestamp argument in ISO-8601 format of 2025-12-31T17:34:01Z
+   # Calculate ISO-8601 UTC timestamp for 24 hours ago
+   my @t = gmtime(time - 86400);  #subtract 86400 seconds from current time to get 24 hours ago
+   my $time_24h_ago = sprintf(
+      "%04d-%02d-%02dT%02d:%02d:%02dZ",
+      $t[5] + 1900,  # year
+      $t[4] + 1,     # month
+      $t[3],         # day
+      $t[2],         # hour
+      $t[1],         # minute
+      $t[0],         # second
+   ); 
+   #
+   #
    # Look for messages related to FIPS errors
    # This would occur if a FIPS-certifed encrypting drive is inserted in node that lacks the required licensing.
    # Note that use use max_records=1 to only get a single message, this avoids duplicates because all cluster nodes will report the same message.
@@ -1042,7 +1056,7 @@ sub get_ems_log_messages {
    #   MyNetApp-02: disk.encryptNoSupport: disk.encryptNoSupport: Detected FIPS-certified encrypting drive 0c.32.9, but FIPS drives are not supported on this node. 1 of 168 disks checked are FIPS-certified.
    #
    #
-   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.encryptNoSupport&max_records=1\' ";
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?time=>=${time_24h_ago}&fields=message.name,log_message,node.name&message.name=disk.encryptNoSupport&max_records=1\' ";
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open (IN,"$cmd 2>&1|");					#open filehandle
    while (<IN>) {						#read a line from the filehandle
@@ -1067,7 +1081,7 @@ sub get_ems_log_messages {
    # MyNetApp-01: disk.init.err.unsupported: disk.init.err.unsupported: Disk 0c.32.9  is not recognized as a supported disk and cannot be used on this node.
    # MyNetApp-02: disk.init.err.unsupported: disk.init.err.unsupported: Disk 0c.32.9  is not recognized as a supported disk and cannot be used on this node.
    #
-   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?fields=message.name,log_message,node.name&message.name=disk.init.err.unsupported&max_records=1\' ";
+   $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/support/ems/events?time=>=${time_24h_ago}&fields=message.name,log_message,node.name&message.name=disk.init.err.unsupported&max_records=1\' ";
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open (IN,"$cmd 2>&1|");					#open filehandle
    while (<IN>) {						#read a line from the filehandle
@@ -1173,7 +1187,7 @@ sub print_output {
    #
    # Look for any EMS event log error messages, add to output message if found
    if ($ems_log_count > 0) {
-      $common_output_data = "Please check EMS log with \"event log show\".  $ems_log_messages , $common_output_data ";
+      $common_output_data = "Please check EMS log with \"event log show\", NOTE that EMS log alerts will age out and expire after 24 hours, but that does NOT mean the problem is fixed, so do NOT ignore this message.  $ems_log_messages , $common_output_data ";
    }
    #
    # print output

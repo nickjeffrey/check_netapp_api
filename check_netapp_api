@@ -15,6 +15,7 @@
 #  2025-01-29	njeffrey	Add $aggregate_count, $volume_count, $ontap_version to output
 #  2025-12-24	njeffrey	Add $total_disk_count,$spare_disk_count to output
 #  2025-12-24	njeffrey	Add get_ems_log_messages subroutine
+#  2026-01-26	njeffrey	Add inode utilization
 
 
 
@@ -888,7 +889,8 @@ sub get_volume_details {
    foreach $key (sort keys %volume) {                          	#loop through for each key value in hash, which is the uuid of each volume
       next unless $key;                                        	#skip any blank lines
       print "\n   found volume with uuid $volume{$key}{uuid} \n" if ($verbose eq "yes");
-      $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes/$volume{$key}{uuid}\' | $jq '{name, uuid, size: .space.size, available: .space.available, used: .space.used}' ";
+      #$cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes/$volume{$key}{uuid}\' | $jq '{name, uuid, size: .space.size, available: .space.available, used: .space.used}' ";
+      $cmd = "$curl -k -s -X GET -u \'$user:$password\' \'https://$host/api/storage/volumes/$volume{$key}{uuid}?fields=name,uuid,space.size,space.available,space.used,files\' | $jq '{name, uuid, size: .space.size, available: .space.available, used: .space.used, files_maximum: .files.maximum, files_used: .files.used}' ";
       print "   running command: $cmd \n" if ($verbose eq "yes");
       open (IN,"$cmd 2>&1|");					#open filehandle
       while (<IN>) {						#read a line from the filehandle
@@ -905,8 +907,22 @@ sub get_volume_details {
          if ( /used: ([0-9]+)/ ) {
             $volume{$key}{used} = $1;				#assign value to hash
          }
+         if ( /files_maximum: ([0-9]+)/ ) {			#this is the maximum inodes for the volume
+            $volume{$key}{files_maximum} = $1;			#assign value to hash
+         }
+         if ( /files_used: ([0-9]+)/ ) {			#this is the number of files currently in the volume
+            $volume{$key}{files_used} = $1;			#assign value to hash
+         }
       }								#end of while loop
       close IN;							#close filehandle
+      #
+      # Calculate the inode usage
+      #
+      if ( ($volume{$key}{files_maximum}) && ($volume{$key}{files_used}) ) {
+         $volume{$key}{files_maximum}++ if ($volume{$key}{files_maximum} == 0);	# add 1 to avoid divide by zero error
+         $volume{$key}{files_used_pct} = $volume{$key}{files_used} / $volume{$key}{files_maximum} * 100; #calculate percent used
+         $volume{$key}{files_used_pct} = sprintf( "%.0f", $volume{$key}{files_used_pct});    	#truncate to 0 decimal place
+      }
       #
       # At this point, we have the volume size in bytes, let's use that to calculate the more human-readable TB and pcercent
       #
@@ -930,10 +946,13 @@ sub get_volume_details {
          $volume{$key}{available_tb} = $volume{$key}{available} /1024/1024/1024/1024;		#convert bytes to TB
          $volume{$key}{available_tb} = sprintf( "%.1f", $volume{$key}{available_tb});         	#truncate to 1 decimal place
          #
-         print "   found volume with uuid:$volume{$key}{uuid} name:$volume{$key}{name}  size_bytes:$volume{$key}{size} available_bytes:$volume{$key}{available} used_bytes:$volume{$key}{used} size_tb:$volume{$key}{size_tb} available_tb:$volume{$key}{available_tb}  used_tb:$volume{$key}{used_tb} used_pct:$volume{$key}{used_pct} \n" if ($verbose eq "yes");
+         print "   found volume with uuid:$volume{$key}{uuid} name:$volume{$key}{name} size_bytes:$volume{$key}{size} available_bytes:$volume{$key}{available} used_bytes:$volume{$key}{used} size_tb:$volume{$key}{size_tb} available_tb:$volume{$key}{available_tb} used_tb:$volume{$key}{used_tb} used_pct:$volume{$key}{used_pct} inodes_used_pct:$volume{$key}{files_used_pct} \n" if ($verbose eq "yes");
       }								#end of if block
    }                                               		#end of foreach loop
-}                                               		#end of subroutine
+}                                               		#end of subroutine	
+
+
+
 
 
 
@@ -1161,6 +1180,12 @@ sub print_output {
       $perf_data = "$perf_data $volume{$key}{name}=$volume{$key}{used};;;;$volume{$key}{size}; ";
    } 								#end of foreach loop
    #
+   # Get all the volumes inode percent util into the $perf_data output
+   foreach $key (sort keys %volume) {                                      #loop through for each key value in hash, which is the uuid of each aggregate
+      next unless $volume{$key}{files_used_pct};		#skip any missing hash keys
+      $perf_data = "$perf_data $volume{$key}{name}_inodes_pct=$volume{$key}{files_used_pct};;;;; ";
+   } 								#end of foreach loop
+   #
    # Look for any aggregates with low free space
    my $aggr_full_count = 0;					#initialize counter variable
    foreach $key (sort keys %aggr) {                             #loop through for each key value in hash, which is the uuid of each aggregate
@@ -1177,8 +1202,19 @@ sub print_output {
       if ($volume{$key}{used_pct} > $volume_full_threshold_warn) {
          $volume_full_count++;					#increment counter variable
          $common_output_data = "Volume $volume{$key}{name} is $volume{$key}{used_pct}\% full.  $common_output_data ";
-         print "   Aggregate $volume{$key}{name} is $volume{$key}{used_pct}\% full. \n" if ($verbose eq "yes");
+         print "   Volume $volume{$key}{name} is $volume{$key}{used_pct}\% full. \n" if ($verbose eq "yes");
       } 								#end of foreach loop
+   } 								#end of foreach loop
+   #
+   # Look for any volumes with low free inodes
+   my $volume_inode_full_count = 0;				#initialize counter variable
+   foreach $key (sort keys %volume) {                           #loop through for each key value in hash, which is the uuid of each volume
+      next unless (defined($volume{$key}{files_used_pct}));	#skip for any missing hash elements
+      if ($volume{$key}{files_used_pct} > 80) {			#hardcoded inode threshold, seems reasonable
+         $volume_inode_full_count++;				#increment counter variable
+         $common_output_data = "Volume $volume{$key}{name} inode allocation $volume{$key}{files_used_pct}\% ($volume{$key}{files_used}/$volume{$key}{files_maximum}) full, check with: vol show -vserver VSERVER -volume $volume{$key}{name} -fields files,files-used .  $common_output_data ";
+         print "   Volume $volume{$key}{name} inode usage $volume{$key}{files_used_pct}\% full. \n" if ($verbose eq "yes");
+      } 							#end of foreach loop
    } 								#end of foreach loop
    #
    # Display the total count of disks and number of spare disks
@@ -1204,7 +1240,7 @@ sub print_output {
       print "$CHECK_NAME WARN - system health is $system{health}, please check with CLI commands: system health status show, system health alert show.  $common_output_data | $perf_data  \n";
       exit $WARN;
    }
-   if ( ($aggr_full_count > 0) || ($volume_full_count > 0) ) {		
+   if ( ($aggr_full_count > 0) || ($volume_full_count > 0) || ($volume_inode_full_count > 0) ) {		
       print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
       exit $WARN;
    }
